@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.jndl.annwatch</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/zhumingyue/.workbuddy/binaries/python/versions/3.13.12/bin/python3</string>
+        <string>/Users/zhumingyue/WorkBuddy/2026-10-10-10-36-56/jn600578-watch/watch.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/zhumingyue/WorkBuddy/2026-10-10-10-36-56/jn600578-watch</string>
+
+    <!-- 每 3600 秒（1 小时）检查一次；想改频率就改这个数字 -->
+    <key>StartInterval</key>
+    <integer>3600</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/zhumingyue/WorkBuddy/2026-10-10-10-36-56/jn600578-watch/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/zhumingyue/WorkBuddy/2026-10-10-10-36-56/jn600578-watch/launchd.err.log</string>
+</dict>
+</plist>

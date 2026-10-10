@@ -27,7 +27,13 @@ jobs:
 
       - name: 运行监控脚本
         env:
+          # 填哪个用哪个，脚本自动探测。至少要配一个，否则任务会失败提醒你
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
+          BARK_KEY: ${{ secrets.BARK_KEY }}
+          WXPUSHER_TOKEN: ${{ secrets.WXPUSHER_TOKEN }}
+          WXPUSHER_UID: ${{ secrets.WXPUSHER_UID }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          DAILY_HEARTBEAT: ${{ secrets.DAILY_HEARTBEAT }}
         run: python3 watch.py
 
       - name: 回写已推送记录

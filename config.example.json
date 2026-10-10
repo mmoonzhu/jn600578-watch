@@ -1,4 +1,12 @@
 {
-  "pushplus_token": "在这里粘贴你的PushPlus token",
-  "_说明": "复制本文件为 config.json 后填写。token 获取方式见 README.md 第一步。也可以不建 config.json，直接设置环境变量 PUSHPLUS_TOKEN。"
+  "_说明": "复制本文件为 config.json，只填你选中的那一个通道即可。云端(GitHub Actions)请改用仓库 Secrets，不要提交 config.json。",
+
+  "WECOM_WEBHOOK": "企业微信群机器人的完整 Webhook 地址（推荐：免费无限、无需实名）",
+  "BARK_KEY": "iPhone Bark App 里的 key（免费、无需实名）",
+  "WXPUSHER_TOKEN": "WxPusher 的 AppToken，形如 AT_xxx",
+  "WXPUSHER_UID": "WxPusher 的 UID，形如 UID_xxx",
+  "PUSHPLUS_TOKEN": "注意：未实名账号微信渠道额度为 0，发不出消息（错误码905）",
+
+  "PUSH_CHANNEL": "可选。留空则自动探测；可显式写 wecom / bark / wxpusher / pushplus",
+  "DAILY_HEARTBEAT": "可选。设为 1 则每天推一条「监控正常」，方便确认系统还在跑"
 }

@@ -233,22 +233,100 @@ def stage_of(title):
 
 
 # ---------------------------------------------------------------------------
-# PushPlus 推送
+# 推送通道（多通道，填哪个用哪个）
+#
+#   pushplus : PUSHPLUS_TOKEN                —— 注意：2024-08 起未实名用户发不出消息(错误码905)
+#   wecom    : WECOM_WEBHOOK                 —— 企业微信群机器人，免费无限、无需实名（推荐）
+#   bark     : BARK_KEY                      —— iOS 原生推送，免费开源、无需实名
+#   wxpusher : WXPUSHER_TOKEN + WXPUSHER_UID —— 微信公众号推送，免费
 # ---------------------------------------------------------------------------
-def pushplus(token, title, content):
-    url = "https://www.pushplus.plus/send"
-    payload = json.dumps({
-        "token": token, "title": title, "content": content,
-        "template": "html", "channel": "wechat",
-    }).encode("utf-8")
-    req = urllib.request.Request(url, data=payload, headers={
+def _post_json(url, payload, timeout=20):
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=body, headers={
         "Content-Type": "application/json", "User-Agent": UA["User-Agent"],
     })
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
-    with urllib.request.urlopen(req, timeout=20, context=ctx) as resp:
+    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
         return json.loads(resp.read().decode("utf-8", "ignore"))
+
+
+def _push_pushplus(token, title, html, plain):
+    r = _post_json("https://www.pushplus.plus/send", {
+        "token": token, "title": title, "content": html,
+        "template": "html", "channel": "wechat",
+    })
+    ok = r.get("code") == 200
+    hint = ""
+    if r.get("code") == 905:
+        hint = "（905 = PushPlus 账号未实名，微信渠道额度为 0，需换通道或实名）"
+    return ok, json.dumps(r, ensure_ascii=False) + hint
+
+
+def _push_wecom(webhook, title, html, plain):
+    # 企业微信机器人 markdown 上限 4096 字节，超了就截断
+    md = "### %s\n%s" % (title, plain)
+    if len(md.encode("utf-8")) > 3800:
+        md = md.encode("utf-8")[:3800].decode("utf-8", "ignore") + "\n…(已截断)"
+    r = _post_json(webhook, {"msgtype": "markdown", "markdown": {"content": md}})
+    return r.get("errcode") == 0, json.dumps(r, ensure_ascii=False)
+
+
+def _push_bark(key, title, html, plain):
+    r = _post_json("https://api.day.app/%s" % key, {
+        "title": title, "body": plain, "group": STOCK_NAME, "isArchive": 1,
+    })
+    return r.get("code") == 200, json.dumps(r, ensure_ascii=False)
+
+
+def _push_wxpusher(token, uid, title, html, plain):
+    r = _post_json("https://wxpusher.zjiecode.com/api/send/message", {
+        "appToken": token, "content": html, "summary": title[:60],
+        "contentType": 2, "uids": [uid],
+    })
+    # WxPusher 成功码是 1000
+    return r.get("code") == 1000, json.dumps(r, ensure_ascii=False)
+
+
+def pick_channel():
+    """决定用哪个通道：优先 PUSH_CHANNEL 显式指定，否则按已填的凭据自动探测。"""
+    forced = os.environ.get("PUSH_CHANNEL", "").strip().lower()
+    env = {
+        "pushplus": os.environ.get("PUSHPLUS_TOKEN", "").strip(),
+        "wecom": os.environ.get("WECOM_WEBHOOK", "").strip(),
+        "bark": os.environ.get("BARK_KEY", "").strip(),
+        "wxpusher": (os.environ.get("WXPUSHER_TOKEN", "").strip()
+                     + os.environ.get("WXPUSHER_UID", "").strip()),
+    }
+    if forced:
+        return forced, env.get(forced, "")
+    for name in ("wecom", "bark", "wxpusher", "pushplus"):
+        if env.get(name):
+            return name, env[name]
+    return "", ""
+
+
+def send(title, html, plain):
+    """统一推送入口，返回 (是否成功, 说明)。"""
+    ch, cred = pick_channel()
+    if not ch:
+        return False, ("未配置任何推送通道。请在仓库 Secrets 里配置下列之一："
+                       "WECOM_WEBHOOK / BARK_KEY / WXPUSHER_TOKEN+WXPUSHER_UID / PUSHPLUS_TOKEN")
+    try:
+        if ch == "wecom":
+            return _push_wecom(cred, title, html, plain)
+        if ch == "bark":
+            return _push_bark(cred, title, html, plain)
+        if ch == "wxpusher":
+            return _push_wxpusher(os.environ.get("WXPUSHER_TOKEN", "").strip(),
+                                  os.environ.get("WXPUSHER_UID", "").strip(),
+                                  title, html, plain)
+        if ch == "pushplus":
+            return _push_pushplus(cred, title, html, plain)
+        return False, "未知通道: %s" % ch
+    except Exception as e:
+        return False, "通道 %s 调用异常: %s" % (ch, e)
 
 
 def build_content(news):
@@ -268,6 +346,18 @@ def build_content(news):
             '</div>' % (n["date"], STOCK_NAME, n["src"], n["title"], n["stage"], link)
         )
     return "".join(rows)
+
+
+def build_plain(news):
+    """纯文本版，给企业微信机器人 / Bark 这类不支持 HTML 的通道用。"""
+    lines = []
+    for n in news:
+        lines.append("【%s】%s" % (n["date"], n["title"]))
+        lines.append("阶段：%s" % n["stage"])
+        if n["url"]:
+            lines.append("原文：%s" % n["url"])
+        lines.append("")
+    return "\n".join(lines).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -314,25 +404,40 @@ def main():
     log("=" * 60)
     log("开始检查 %s(%s) 公告" % (STOCK_NAME, STOCK_CODE))
 
-    token = get_token()
-    if not token:
-        log("未配置 PushPlus token，请把 config.example.json 复制为 config.json 并填入 token")
-        print("\n未配置 PushPlus token。")
-        print("1) 打开 https://www.pushplus.plus/ 微信扫码登录")
-        print("2) 首页复制你的 token（32位字符串）")
-        print("3) 编辑 %s 填入 token" % CONFIG_PATH)
+    # 本地 config.json 里的配置注入环境变量（云端用 Secrets，本地用文件，两者兼容）
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                for k, v in json.load(f).items():
+                    if isinstance(v, str) and not k.startswith("_"):
+                        K = k.upper()
+                        if not os.environ.get(K):
+                            os.environ[K] = v.strip()
+        except Exception as e:
+            log("读取 config.json 失败: %s" % e)
+
+    if not pick_channel()[0]:
+        log("未配置任何推送通道")
+        print("\n未配置推送通道。任选其一配置即可：\n"
+              "  WECOM_WEBHOOK    企业微信群机器人（免费无限、无需实名）\n"
+              "  BARK_KEY         iPhone 推送（免费、无需实名）\n"
+              "  WXPUSHER_TOKEN + WXPUSHER_UID   微信公众号推送（免费）\n"
+              "  PUSHPLUS_TOKEN   注意：未实名账号额度为 0，发不出消息\n")
         sys.exit(2)
+    log("使用推送通道: %s" % pick_channel()[0])
 
     if do_test:
-        r = pushplus(token, "【测试】京能电力公告监控已就绪",
-                     '<div style="padding:20px;font-family:-apple-system,sans-serif;">'
-                     '<h3>✅ 配置成功</h3>'
-                     '<p>京能电力（600578.SH）定增/定向融资公告将推送到这个微信。</p>'
-                     '<p style="color:#8a8f99;">测试时间：%s</p></div>'
-                     % datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        log("测试推送返回: %s" % r)
-        print("推送结果:", json.dumps(r, ensure_ascii=False))
-        sys.exit(0 if r.get("code") == 200 else 1)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        title = "【测试】京能电力公告监控已就绪"
+        html = ('<div style="padding:20px;font-family:-apple-system,sans-serif;">'
+                '<h3>配置成功</h3>'
+                '<p>京能电力（600578.SH）定增/定向融资公告将推送到这里。</p>'
+                '<p style="color:#8a8f99;">测试时间：%s</p></div>' % now)
+        plain = "配置成功\n京能电力（600578.SH）定增/定向融资公告将推送到这里。\n测试时间：%s" % now
+        ok, info = send(title, html, plain)
+        log("测试推送返回: %s | 成功=%s" % (info, ok))
+        print("推送结果:", info)
+        sys.exit(0 if ok else 1)
 
     # 抓取 -> 统一标题 -> 去重（两源标题前缀不同，必须先清洗再去重）
     raw_items = fetch_eastmoney() + fetch_cninfo()
@@ -383,48 +488,66 @@ def main():
             if latest:
                 tail = ("<p style='font-size:14px;'>当前最新一条定增公告："
                         "<b>%s</b>（%s）</p>" % (latest[0]["title"], latest[0]["date"]))
-            try:
-                r = pushplus(token, "【%s】公告监控已启动" % STOCK_NAME,
-                             '<div style="padding:20px;font-family:-apple-system,sans-serif;">'
-                             '<h3>✅ 监控已启动</h3>'
-                             '<p>京能电力（600578.SH）定增/定向融资公告将自动推送到本微信。</p>'
-                             '<p style="color:#8a8f99;">已记录 %d 条历史公告作为基线，'
-                             '此后仅推送新增公告。</p>%s</div>' % (len(seen), tail))
-                log("启动通知推送结果: %s" % r)
-            except Exception as e:
-                log("启动通知推送失败: %s" % e)
+            plain = ("监控已启动\n京能电力（600578.SH）定增/定向融资公告将自动推送到这里。\n"
+                     "已记录 %d 条历史公告作为基线，此后仅推送新增公告。" % len(seen))
+            if latest:
+                plain += "\n当前最新一条定增公告：%s（%s）" % (latest[0]["title"], latest[0]["date"])
+            ok, info = send("【%s】公告监控已启动" % STOCK_NAME,
+                            '<div style="padding:20px;font-family:-apple-system,sans-serif;">'
+                            '<h3>监控已启动</h3>'
+                            '<p>京能电力（600578.SH）定增/定向融资公告将自动推送到这里。</p>'
+                            '<p style="color:#8a8f99;">已记录 %d 条历史公告作为基线，'
+                            '此后仅推送新增公告。</p>%s</div>' % (len(seen), tail),
+                            plain)
+            log("启动通知推送结果: %s | 成功=%s" % (info, ok))
+            # 启动通知发不出去说明通道有问题，必须让任务失败，否则用户会一直蒙在鼓里
+            if not ok:
+                print("启动通知推送失败：%s" % info)
+                sys.exit(1)
         sys.exit(0)
 
     if not news:
         log("本次检查无新增定增相关公告")
+        # 可选心跳：每天推一条"我还在跑"，让你确认系统没死。设 DAILY_HEARTBEAT=1 开启
+        if os.environ.get("DAILY_HEARTBEAT", "").strip() == "1":
+            today = datetime.now().strftime("%Y-%m-%d")
+            if state.get("last_heartbeat") != today:
+                now = datetime.now().strftime("%Y-%m-%d %H:%M")
+                ok, info = send("【%s】监控正常" % STOCK_NAME,
+                                '<div style="padding:16px;font-family:-apple-system,sans-serif;">'
+                                '<p>监控正常运行，本次检查无新增定增公告。</p>'
+                                '<p style="color:#8a8f99;">检查时间：%s</p></div>' % now,
+                                "监控正常运行，本次检查无新增定增公告。\n检查时间：%s" % now)
+                log("心跳推送: %s | 成功=%s" % (info, ok))
+                if not ok:
+                    print("心跳推送失败：%s" % info)
+                    sys.exit(1)
+                state["last_heartbeat"] = today
         save_state(state)
         sys.exit(0)
 
     log("发现 %d 条新公告，准备推送" % len(news))
-    content = build_content(news)
+    html = build_content(news)
+    plain = build_plain(news)
     title = "【%s】定增新公告 %d 条 · %s" % (STOCK_NAME, len(news), news[0]["stage"].strip("①②③④⑤⑥⑦ "))
 
     if do_dry:
         print("\n--- 将要推送 ---\n标题:", title)
         for n in news:
-            print("  [%s] %s | %s | %s" % (n["date"], n["stage"], n["title"], n["url"]))
+            print("  [%s] %s | %s" % (n["date"], n["stage"], n["title"]))
         sys.exit(0)
 
     for attempt in range(3):
-        try:
-            r = pushplus(token, title, content)
-            log("推送返回: %s" % r)
-            if r.get("code") == 200:
-                for x in news:
-                    seen.add(norm(x["title"]))
-                state["seen"] = sorted(seen)
-                save_state(state)
-                log("推送成功，状态已更新")
-                print("推送成功：%d 条公告已发到微信" % len(news))
-                sys.exit(0)
-            log("推送失败(code=%s): %s" % (r.get("code"), r.get("msg")))
-        except Exception as e:
-            log("推送异常(第%d次): %s" % (attempt + 1, e))
+        ok, info = send(title, html, plain)
+        log("推送返回(第%d次): %s | 成功=%s" % (attempt + 1, info, ok))
+        if ok:
+            for x in news:
+                seen.add(norm(x["title"]))
+            state["seen"] = sorted(seen)
+            save_state(state)
+            log("推送成功，状态已更新")
+            print("推送成功：%d 条公告已发出" % len(news))
+            sys.exit(0)
         time.sleep(3)
 
     log("三次推送均失败，状态未更新，下次会重试")

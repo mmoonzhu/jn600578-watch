@@ -7,45 +7,47 @@
 
 ---
 
-## 第 1 步：拿到 PushPlus token（2 分钟）
+## 第 1 步：选一个推送通道
 
-1. 手机或电脑打开 **https://www.pushplus.plus/**
-2. 点「微信扫码登录」，用微信扫一下
-3. 登录后首页会显示你的 **token**（32 位字符串），点复制
-4. 页面下方点「关注公众号」→ 关注 **pushplus推送加** 这个公众号（**必须关注，否则收不到消息**）
+> ⚠️ **不要用未实名的 PushPlus。** 官方自 2024-08 起规定：未实名认证用户无法调用发送接口
+> （返回错误码 `905`），微信渠道日额度为 **0 次**。而实名要么单独付费，要么买会员。
+> 所以 PushPlus 只适合你已经实名/买了会员的情况。
+>
+> 脚本已支持多通道，**填哪个用哪个**，切换不用改代码。
 
-> 免费版每天 200 条，这个场景一天最多几条，完全够用。
+| 通道 | 免费 | 实名 | 消息落在哪 | 怎么拿凭据 |
+|---|---|---|---|---|
+| **企业微信群机器人**（推荐） | 是，无限量 | 不需要 | 企业微信 App | 企业微信里建个群（可以只有你自己）→ 群设置 → 群机器人 → 添加 → 复制 Webhook 地址 |
+| **Bark** | 是，开源 | 不需要 | iPhone 通知栏 | App Store 装 Bark → 打开 App 复制 key（形如 `https://api.day.app/xxxxx` 的末段） |
+| **WxPusher** | 是 | 不需要 | 微信 | wxpusher.zjiecode.com 微信扫码注册 → 创建应用拿 `AppToken` → 扫码关注拿 `UID` |
+| PushPlus | 否（未实名发不出） | **需要付费** | 微信 | 未实名请跳过 |
 
-## 第 2 步：填 token
+> 企业微信不需要企业认证，个人注册即可，建个"只有自己"的群完全没问题。
 
-> **如果你要走上面的 GitHub Actions 云端方案，跳过这一步**，直接去仓库 Settings 里
-> 配 `PUSHPLUS_TOKEN` Secret 即可，本地不需要建 config.json。
-> 这一步是给**本地运行**（方案 B / C）用的。
+## 第 2 步：填凭据
 
-在本目录下执行：
+**走 GitHub Actions 云端**：仓库 **Settings → Secrets and variables → Actions → New repository secret**，
+按通道填一个即可（`WECOM_WEBHOOK` / `BARK_KEY` / `WXPUSHER_TOKEN`+`WXPUSHER_UID`）。
+加密存储，日志里显示 `***`。本地不需要建 config.json。
+
+**本地运行**：
 
 ```bash
 cd /Users/zhumingyue/WorkBuddy/2026-10-10-10-36-56/jn600578-watch
 cp config.example.json config.json
 ```
 
-然后编辑 `config.json`，把 token 粘进去：
-
-```json
-{
-  "pushplus_token": "粘贴你的32位token"
-}
-```
-
-（不想建文件也行：设置环境变量 `PUSHPLUS_TOKEN` 同样生效。）
+编辑 `config.json`，把你选中的那一项填进去，其余删掉即可。
+（不想建文件也行：设置同名环境变量同样生效。）
 
 ## 第 3 步：验证能收到
 
 ```bash
-python3 watch.py --test
+WECOM_WEBHOOK=你的地址 python3 watch.py --test     # 换成你选的通道
 ```
 
-返回 `"code":200` 且微信收到一条「配置成功」的测试消息，就说明通了。
+手机收到一条「配置成功」的测试消息，就说明通了。**没收到就一定是没配好**——
+脚本会打印接口返回的原始错误，照着改就行。
 
 ## 第 4 步：正式启用
 
@@ -54,6 +56,10 @@ python3 watch.py        # 首次运行会自动建立基线并发一条「监控
 ```
 
 之后每次运行只推送新增公告。
+
+**推送失败会立刻暴露**：脚本在推送失败时以退出码 1 结束，GitHub Actions 那个 job 会变红，
+GitHub 还会给你发邮件。不会再出现"显示成功但根本没发出去"的情况。
+（可选：配 `DAILY_HEARTBEAT=1`，每天推一条「监控正常」，用来确认系统还活着。）
 
 ---
 
@@ -83,15 +89,21 @@ git push -u origin main
 > 目录里 `.github/workflows/ann-watch.yml` 已经写好了，**不用改**，
 > 传上去后 GitHub 会自动识别并开始定时执行。
 
-**A-2. 把 token 放进 Secrets（不要写进文件）**
+**A-2. 把推送凭据放进 Secrets（不要写进文件）**
 
 仓库页面 → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**
 
-- Name：`PUSHPLUS_TOKEN`
-- Secret：粘贴你的 PushPlus token
+按你在第 1 步选的通道填（至少填一个，别用未实名的 PushPlus）：
 
-这是加密存储的，日志里会自动显示为 `***`，**比明文写进文件安全**。
-这一步做完，本地根本不需要 `config.json`。
+| 通道 | Secret 名 |
+|---|---|
+| 企业微信机器人 | `WECOM_WEBHOOK` |
+| Bark | `BARK_KEY` |
+| WxPusher | `WXPUSHER_TOKEN` 和 `WXPUSHER_UID`（两个都要） |
+
+加密存储，日志里显示为 `***`，比明文写进文件安全。配好之后本地不需要 `config.json`。
+
+想每天收到一条「监控正常」的保活消息，再加一个 `DAILY_HEARTBEAT` = `1`（不加也行）。
 
 **A-3. 验证**
 
