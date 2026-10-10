@@ -27,7 +27,13 @@ jobs:
 
       - name: 运行监控脚本
         env:
-          # 填哪个用哪个，脚本自动探测。至少要配一个，否则任务会失败提醒你
+          # 邮件通道（推荐：配合 QQ 邮箱「微信提醒」，新邮件会在微信弹通知）
+          EMAIL_HOST: ${{ secrets.EMAIL_HOST }}
+          EMAIL_PORT: ${{ secrets.EMAIL_PORT }}
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          # 其他通道，填哪个用哪个
           WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
           BARK_KEY: ${{ secrets.BARK_KEY }}
           WXPUSHER_TOKEN: ${{ secrets.WXPUSHER_TOKEN }}

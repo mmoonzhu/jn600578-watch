@@ -1,12 +1,18 @@
 {
   "_说明": "复制本文件为 config.json，只填你选中的那一个通道即可。云端(GitHub Actions)请改用仓库 Secrets，不要提交 config.json。",
 
-  "WECOM_WEBHOOK": "企业微信群机器人的完整 Webhook 地址（推荐：免费无限、无需实名）",
+  "EMAIL_USER": "发件邮箱完整地址，如 123456@qq.com",
+  "EMAIL_PASS": "SMTP 授权码（不是邮箱登录密码！QQ邮箱在 设置→账户→开启SMTP服务 生成）",
+  "EMAIL_TO": "收件地址，留空则发给自己",
+  "EMAIL_HOST": "可选，默认 smtp.qq.com",
+  "EMAIL_PORT": "可选，默认 465（SSL）；587 会自动改用 STARTTLS",
+
+  "WECOM_WEBHOOK": "企业微信群机器人的完整 Webhook 地址（免费无限、无需实名）",
   "BARK_KEY": "iPhone Bark App 里的 key（免费、无需实名）",
   "WXPUSHER_TOKEN": "WxPusher 的 AppToken，形如 AT_xxx",
   "WXPUSHER_UID": "WxPusher 的 UID，形如 UID_xxx",
   "PUSHPLUS_TOKEN": "注意：未实名账号微信渠道额度为 0，发不出消息（错误码905）",
 
-  "PUSH_CHANNEL": "可选。留空则自动探测；可显式写 wecom / bark / wxpusher / pushplus",
+  "PUSH_CHANNEL": "可选。留空则自动探测；可显式写 email / wecom / bark / wxpusher / pushplus",
   "DAILY_HEARTBEAT": "可选。设为 1 则每天推一条「监控正常」，方便确认系统还在跑"
 }

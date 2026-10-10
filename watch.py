@@ -16,12 +16,15 @@
 import json
 import os
 import re
+import smtplib
 import ssl
 import sys
 import time
 import urllib.parse
 import urllib.request
 from datetime import datetime
+from email.header import Header
+from email.mime.text import MIMEText
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
@@ -236,9 +239,10 @@ def stage_of(title):
 # 推送通道（多通道，填哪个用哪个）
 #
 #   pushplus : PUSHPLUS_TOKEN                —— 注意：2024-08 起未实名用户发不出消息(错误码905)
-#   wecom    : WECOM_WEBHOOK                 —— 企业微信群机器人，免费无限、无需实名（推荐）
+#   wecom    : WECOM_WEBHOOK                 —— 企业微信群机器人，免费无限、无需实名
 #   bark     : BARK_KEY                      —— iOS 原生推送，免费开源、无需实名
 #   wxpusher : WXPUSHER_TOKEN + WXPUSHER_UID —— 微信公众号推送，免费
+#   email    : EMAIL_USER + EMAIL_PASS       —— 邮件，免费；配 QQ邮箱微信提醒可变相推到微信
 # ---------------------------------------------------------------------------
 def _post_json(url, payload, timeout=20):
     body = json.dumps(payload).encode("utf-8")
@@ -289,19 +293,64 @@ def _push_wxpusher(token, uid, title, html, plain):
     return r.get("code") == 1000, json.dumps(r, ensure_ascii=False)
 
 
+def _push_email(title, html, plain):
+    # GitHub Secrets 未填时环境变量会是空字符串，所以要用 or 兜底，不能用 get 的默认值
+    host = os.environ.get("EMAIL_HOST", "").strip() or "smtp.qq.com"
+    try:
+        port = int(os.environ.get("EMAIL_PORT", "").strip() or 465)
+    except ValueError:
+        port = 465
+    user = os.environ.get("EMAIL_USER", "").strip()
+    pwd = os.environ.get("EMAIL_PASS", "").strip()
+    to = os.environ.get("EMAIL_TO", "").strip() or user
+    rcpts = [x.strip() for x in to.replace(";", ",").split(",") if x.strip()]
+    if not user or not pwd:
+        return False, "EMAIL_USER / EMAIL_PASS 未配置完整"
+
+    msg = MIMEText(html, "html", "utf-8")
+    msg["Subject"] = Header(title, "utf-8")
+    msg["From"] = user
+    msg["To"] = ", ".join(rcpts)
+
+    srv = None
+    try:
+        if port == 465:
+            srv = smtplib.SMTP_SSL(host, port, timeout=25)
+        else:
+            srv = smtplib.SMTP(host, port, timeout=25)
+            srv.starttls()
+        srv.login(user, pwd)
+        srv.sendmail(user, rcpts, msg.as_string())
+        return True, "已发送至 %s（SMTP %s:%d）" % (", ".join(rcpts), host, port)
+    except smtplib.SMTPAuthenticationError as e:
+        return False, ("SMTP 认证失败：%s。注意 EMAIL_PASS 要填「授权码」不是邮箱登录密码"
+                       "（QQ邮箱：设置→账户→开启 SMTP 服务→生成授权码）" % e)
+    except Exception as e:
+        return False, "SMTP 发送失败（%s:%d）：%s" % (host, port, e)
+    finally:
+        if srv:
+            try:
+                srv.quit()
+            except Exception:
+                pass
+
+
 def pick_channel():
     """决定用哪个通道：优先 PUSH_CHANNEL 显式指定，否则按已填的凭据自动探测。"""
     forced = os.environ.get("PUSH_CHANNEL", "").strip().lower()
-    env = {
-        "pushplus": os.environ.get("PUSHPLUS_TOKEN", "").strip(),
+    candidates = {
         "wecom": os.environ.get("WECOM_WEBHOOK", "").strip(),
         "bark": os.environ.get("BARK_KEY", "").strip(),
         "wxpusher": (os.environ.get("WXPUSHER_TOKEN", "").strip()
                      + os.environ.get("WXPUSHER_UID", "").strip()),
+        "email": (os.environ.get("EMAIL_USER", "").strip()
+                  + os.environ.get("EMAIL_PASS", "").strip()),
+        "pushplus": os.environ.get("PUSHPLUS_TOKEN", "").strip(),
     }
+    env = candidates
     if forced:
         return forced, env.get(forced, "")
-    for name in ("wecom", "bark", "wxpusher", "pushplus"):
+    for name in ("wecom", "bark", "wxpusher", "email", "pushplus"):
         if env.get(name):
             return name, env[name]
     return "", ""
@@ -322,6 +371,8 @@ def send(title, html, plain):
             return _push_wxpusher(os.environ.get("WXPUSHER_TOKEN", "").strip(),
                                   os.environ.get("WXPUSHER_UID", "").strip(),
                                   title, html, plain)
+        if ch == "email":
+            return _push_email(title, html, plain)
         if ch == "pushplus":
             return _push_pushplus(cred, title, html, plain)
         return False, "未知通道: %s" % ch

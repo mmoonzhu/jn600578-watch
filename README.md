@@ -17,12 +17,20 @@
 
 | 通道 | 免费 | 实名 | 消息落在哪 | 怎么拿凭据 |
 |---|---|---|---|---|
-| **企业微信群机器人**（推荐） | 是，无限量 | 不需要 | 企业微信 App | 企业微信里建个群（可以只有你自己）→ 群设置 → 群机器人 → 添加 → 复制 Webhook 地址 |
-| **Bark** | 是，开源 | 不需要 | iPhone 通知栏 | App Store 装 Bark → 打开 App 复制 key（形如 `https://api.day.app/xxxxx` 的末段） |
-| **WxPusher** | 是 | 不需要 | 微信 | wxpusher.zjiecode.com 微信扫码注册 → 创建应用拿 `AppToken` → 扫码关注拿 `UID` |
+| **邮件**（推荐） | 是 | 不需要 | 邮箱；**配好 QQ 邮箱「微信提醒」后，微信里也会弹通知** | QQ 邮箱 → 设置 → 账户 → 开启 SMTP 服务 → 生成**授权码**（16 位，不是登录密码） |
+| **企业微信群机器人** | 是，无限量 | 不需要 | 企业微信 App | 企业微信建个群（可以只有你自己）→ 群机器人 → 添加 → 复制 Webhook 地址 |
+| **Bark** | 是，开源 | 不需要 | iPhone 通知栏 | App Store 装 Bark → 打开复制 key |
+| **WxPusher** | 是 | 不需要 | 微信 | wxpusher.zjiecode.com 扫码注册 → 创建应用拿 `AppToken` → 扫码关注拿 `UID` |
 | PushPlus | 否（未实名发不出） | **需要付费** | 微信 | 未实名请跳过 |
 
 > 企业微信不需要企业认证，个人注册即可，建个"只有自己"的群完全没问题。
+
+### 用邮件？这样让它推到你的微信
+
+邮件本身会在邮箱里，但只要在微信里关注「**QQ邮箱提醒**」公众号并绑定你的 QQ 邮箱，
+新邮件到达时微信会直接弹通知——效果等同于推到微信，且完全免费。
+
+设置：微信 → 搜索公众号「QQ邮箱提醒」→ 关注 → 按提示绑定邮箱 → 打开「提醒」开关。
 
 ## 第 2 步：填凭据
 
@@ -43,11 +51,14 @@ cp config.example.json config.json
 ## 第 3 步：验证能收到
 
 ```bash
-WECOM_WEBHOOK=你的地址 python3 watch.py --test     # 换成你选的通道
+EMAIL_USER=你的邮箱@qq.com EMAIL_PASS=授权码 python3 watch.py --test
 ```
 
-手机收到一条「配置成功」的测试消息，就说明通了。**没收到就一定是没配好**——
+手机收到一封标题为「配置成功」的邮件，就说明通了。**没收到就一定是没配好**——
 脚本会打印接口返回的原始错误，照着改就行。
+
+> 最常见的坑：`EMAIL_PASS` 填成了邮箱登录密码。要用**授权码**（QQ 邮箱 设置→账户→开启 SMTP 服务
+> 后生成的 16 位字符串）。填错会明确提示「SMTP 认证失败」。
 
 ## 第 4 步：正式启用
 
@@ -94,6 +105,18 @@ git push -u origin main
 仓库页面 → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**
 
 按你在第 1 步选的通道填（至少填一个，别用未实名的 PushPlus）：
+
+**邮件**（最少填这两个，其余可留空）：
+
+| Secret 名 | 值 |
+|---|---|
+| `EMAIL_USER` | 发件邮箱完整地址，如 `123456@qq.com` |
+| `EMAIL_PASS` | SMTP **授权码**（16 位，不是邮箱登录密码） |
+| `EMAIL_TO` | 可选，收件地址，留空则发给自己 |
+| `EMAIL_HOST` | 可选，默认 `smtp.qq.com`；163 填 `smtp.163.com`，Gmail 填 `smtp.gmail.com` |
+| `EMAIL_PORT` | 可选，默认 `465`（SSL）；填 `587` 会自动改用 STARTTLS |
+
+其他通道：
 
 | 通道 | Secret 名 |
 |---|---|
