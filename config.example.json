@@ -1,0 +1,4 @@
+{
+  "pushplus_token": "在这里粘贴你的PushPlus token",
+  "_说明": "复制本文件为 config.json 后填写。token 获取方式见 README.md 第一步。也可以不建 config.json，直接设置环境变量 PUSHPLUS_TOKEN。"
+}

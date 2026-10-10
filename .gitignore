@@ -1,0 +1,6 @@
+# token 只存本地，绝不能提交到仓库（云端方案请用 GitHub Secrets）
+config.json
+
+# 日志与 Python 缓存
+*.log
+__pycache__/
