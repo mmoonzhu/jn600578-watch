@@ -8,11 +8,11 @@
   * 用「发布日期窗口」代替历史记录判断新旧（数据源只精确到日期，无法做小时级窗口）
   * 仅依赖 Python 标准库，任何 Python 3 都能直接跑
 
-用法：
-  PUSHPLUS_TOKEN=你的token python3 watch_cloud.py
-  PUSHPLUS_TOKEN=xxx WINDOW_DAYS=3 python3 watch_cloud.py   # 扩大回溯天数
-  PUSHPLUS_TOKEN=xxx python3 watch_cloud.py --dry            # 只打印不推送
-  PUSHPLUS_TOKEN=xxx python3 watch_cloud.py --test           # 发一条测试消息
+用法（和 watch.py 用同一套环境变量，邮件为例）：
+  EMAIL_USER=xxx EMAIL_PASS=yyy python3 watch_cloud.py
+  EMAIL_USER=xxx EMAIL_PASS=yyy WINDOW_DAYS=3 python3 watch_cloud.py   # 扩大回溯天数
+  EMAIL_USER=xxx EMAIL_PASS=yyy python3 watch_cloud.py --dry           # 只打印不发送
+  EMAIL_USER=xxx EMAIL_PASS=yyy python3 watch_cloud.py --test          # 发一封测试邮件
 
 已知取舍：由于公告时间只有日期粒度，本版本可能把同一份公告重复推送 1 次
 （窗口内每天第一次命中都会推）。不漏优先于不重复。
@@ -196,6 +196,49 @@ def pushplus(token, title, content):
         return json.loads(resp.read().decode("utf-8", "ignore"))
 
 
+def build_plain(news):
+    lines = []
+    for n in news:
+        lines.append("【%s】%s" % (n["date"], n["title"]))
+        lines.append("阶段：%s" % n["stage"])
+        if n["url"]:
+            lines.append("原文：%s" % n["url"])
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def notify(title, html, plain):
+    """复用 watch.py 的多通道发送能力（邮件/企业微信/Bark/WxPusher）。
+
+    需要和 watch.py 放在同一目录；如果加载不到就退回 PushPlus。
+    """
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import watch
+        return watch.send(title, html, plain)
+    except Exception as e:
+        token = os.environ.get("PUSHPLUS_TOKEN", "").strip()
+        if not token:
+            return False, ("无法加载 watch.py（请确保两者同目录）且未配置 PUSHPLUS_TOKEN: %s" % e)
+        try:
+            r = pushplus(token, title, html)
+            return r.get("code") == 200, json.dumps(r, ensure_ascii=False)
+        except Exception as e2:
+            return False, "退化通道也失败: %s" % e2
+    payload = json.dumps({
+        "token": token, "title": title, "content": content,
+        "template": "html", "channel": "wechat",
+    }).encode("utf-8")
+    req = urllib.request.Request("https://www.pushplus.plus/send", data=payload,
+                                 headers={"Content-Type": "application/json",
+                                          "User-Agent": UA["User-Agent"]})
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    with urllib.request.urlopen(req, timeout=20, context=ctx) as resp:
+        return json.loads(resp.read().decode("utf-8", "ignore"))
+
+
 def build_content(news):
     rows = []
     for n in news:
@@ -220,21 +263,21 @@ def main():
     do_test = "--test" in args
     do_dry = "--dry" in args
 
-    token = os.environ.get("PUSHPLUS_TOKEN", "").strip()
-    if not token:
-        log("未设置环境变量 PUSHPLUS_TOKEN")
-        print("用法: PUSHPLUS_TOKEN=你的token python3 watch_cloud.py")
-        sys.exit(2)
-
     if do_test:
-        r = pushplus(token, "【测试】京能电力公告监控已就绪",
-                     '<div style="padding:20px;font-family:-apple-system,sans-serif;">'
-                     '<h3>配置成功</h3>'
-                     '<p>京能电力（600578.SH）定增/定向融资公告将推送到这个微信。</p>'
-                     '<p style="color:#8a8f99;">测试时间：%s</p></div>'
-                     % datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        log("测试推送返回: %s" % r)
-        sys.exit(0 if r.get("code") == 200 else 1)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ok, info = notify(
+            "【测试】京能电力公告监控已就绪",
+            '<div style="padding:20px;font-family:-apple-system,sans-serif;">'
+            '<h3>配置成功</h3>'
+            '<p>京能电力（600578.SH）定增/定向融资公告将自动发送到这里。</p>'
+            '<p style="color:#8a8f99;">测试时间：%s</p></div>' % now,
+            "配置成功\n京能电力（600578.SH）定增/定向融资公告将自动发送到这里。\n测试时间：%s" % now)
+        log("测试发送返回: %s | 成功=%s" % (info, ok))
+        if not ok:
+            print("\n未配置推送通道。环境变量任选其一：\n"
+                  "  EMAIL_USER + EMAIL_PASS   邮件（推荐，免费、无需实名）\n"
+                  "  WECOM_WEBHOOK / BARK_KEY / WXPUSHER_TOKEN+WXPUSHER_UID\n")
+        sys.exit(0 if ok else 1)
 
     raw = fetch_eastmoney() + fetch_cninfo()
     for x in raw:
@@ -275,17 +318,14 @@ def main():
         sys.exit(0)
 
     for attempt in range(3):
-        try:
-            r = pushplus(token, title, build_content(hits))
-            log("推送返回: %s" % r)
-            if r.get("code") == 200:
-                log("推送成功：%d 条" % len(hits))
-                sys.exit(0)
-        except Exception as e:
-            log("推送异常(第%d次): %s" % (attempt + 1, e))
+        ok, info = notify(title, build_content(hits), build_plain(hits))
+        log("发送返回(第%d次): %s | 成功=%s" % (attempt + 1, info, ok))
+        if ok:
+            log("发送成功：%d 条" % len(hits))
+            sys.exit(0)
         time.sleep(3)
 
-    log("三次推送均失败")
+    log("三次发送均失败")
     sys.exit(1)
 
 

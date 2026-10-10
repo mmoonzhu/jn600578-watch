@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-京能电力 (600578.SH) 定向融资 / 定增 公告监控 -> PushPlus 微信推送
+京能电力 (600578.SH) 定向融资 / 定增 公告监控 -> 邮件推送
 
 用法:
-    python3 watch.py            正常检查，有新公告就推送
-    python3 watch.py --init     首次运行：只记录当前公告基线，不推送
-    python3 watch.py --test     发一条测试消息到微信，验证 token 是否配置正确
-    python3 watch.py --dry      只在终端打印将要推送的内容，不实际推送、不写状态
+    python3 watch.py            正常检查，有新公告就发邮件
+    python3 watch.py --init     首次运行：只记录当前公告基线，不发邮件
+    python3 watch.py --test     发一封测试邮件，验证邮箱配置是否正确
+    python3 watch.py --dry      只在终端打印将要发送的内容，不实际发送、不写状态
     python3 watch.py --all      忽略关键词过滤，检查全部公告
+
+凭据（推荐放 GitHub Secrets，不要写进文件）：
+    EMAIL_USER   发件邮箱完整地址
+    EMAIL_PASS   SMTP 授权码（不是邮箱登录密码）
+    EMAIL_TO     收件地址，留空则发给自己；多个用逗号分隔
+    EMAIL_HOST   默认 smtp.qq.com（163: smtp.163.com / Gmail: smtp.gmail.com）
+    EMAIL_PORT   默认 465（SSL）；填 587 自动改用 STARTTLS
 
 仅依赖 Python 标准库，无需 pip 安装任何包。
 """
@@ -24,7 +31,9 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 from email.header import Header
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.utils import formataddr, formatdate, make_msgid
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
@@ -293,6 +302,18 @@ def _push_wxpusher(token, uid, title, html, plain):
     return r.get("code") == 1000, json.dumps(r, ensure_ascii=False)
 
 
+def mask_addr(addr):
+    """日志里打码邮箱，避免 Secrets 里的地址出现在 GitHub Actions 日志中。"""
+    try:
+        name, _, domain = addr.partition("@")
+    except Exception:
+        return "***"
+    if not domain:
+        return addr
+    head = name[:1] + "***" + name[-1:] if len(name) > 2 else "***"
+    return "%s@%s" % (head, domain)
+
+
 def _push_email(title, html, plain):
     # GitHub Secrets 未填时环境变量会是空字符串，所以要用 or 兜底，不能用 get 的默认值
     host = os.environ.get("EMAIL_HOST", "").strip() or "smtp.qq.com"
@@ -306,12 +327,21 @@ def _push_email(title, html, plain):
     rcpts = [x.strip() for x in to.replace(";", ",").split(",") if x.strip()]
     if not user or not pwd:
         return False, "EMAIL_USER / EMAIL_PASS 未配置完整"
+    if not rcpts:
+        return False, "EMAIL_TO 为空且 EMAIL_USER 也不是合法邮箱"
 
-    msg = MIMEText(html, "html", "utf-8")
+    # multipart/alternative：同时给纯文本和 HTML，邮件客户端自选；
+    # 只发 HTML 容易被判为垃圾邮件，这是邮件通道必须的一步
+    msg = MIMEMultipart("alternative")
     msg["Subject"] = Header(title, "utf-8")
-    msg["From"] = user
+    msg["From"] = formataddr((str(Header("京能电力公告监控", "utf-8")), user))
     msg["To"] = ", ".join(rcpts)
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid()
+    msg.attach(MIMEText(plain or "（无正文）", "plain", "utf-8"))
+    msg.attach(MIMEText(html or plain or "（无正文）", "html", "utf-8"))
 
+    shown = ", ".join(mask_addr(x) for x in rcpts)
     srv = None
     try:
         if port == 465:
@@ -321,10 +351,10 @@ def _push_email(title, html, plain):
             srv.starttls()
         srv.login(user, pwd)
         srv.sendmail(user, rcpts, msg.as_string())
-        return True, "已发送至 %s（SMTP %s:%d）" % (", ".join(rcpts), host, port)
+        return True, "邮件已发送至 %s（SMTP %s:%d）" % (shown, host, port)
     except smtplib.SMTPAuthenticationError as e:
         return False, ("SMTP 认证失败：%s。注意 EMAIL_PASS 要填「授权码」不是邮箱登录密码"
-                       "（QQ邮箱：设置→账户→开启 SMTP 服务→生成授权码）" % e)
+                       "（QQ邮箱：设置→账户→开启 SMTP 服务→生成 16 位授权码）" % e)
     except Exception as e:
         return False, "SMTP 发送失败（%s:%d）：%s" % (host, port, e)
     finally:
@@ -350,7 +380,8 @@ def pick_channel():
     env = candidates
     if forced:
         return forced, env.get(forced, "")
-    for name in ("wecom", "bark", "wxpusher", "email", "pushplus"):
+    # 邮件排第一：公司里最稳、免费、无实名要求，且配了邮箱微信提醒就能回到微信
+    for name in ("email", "wecom", "bark", "wxpusher", "pushplus"):
         if env.get(name):
             return name, env[name]
     return "", ""
@@ -360,8 +391,9 @@ def send(title, html, plain):
     """统一推送入口，返回 (是否成功, 说明)。"""
     ch, cred = pick_channel()
     if not ch:
-        return False, ("未配置任何推送通道。请在仓库 Secrets 里配置下列之一："
-                       "WECOM_WEBHOOK / BARK_KEY / WXPUSHER_TOKEN+WXPUSHER_UID / PUSHPLUS_TOKEN")
+        return False, ("未配置任何推送通道。请在仓库 Secrets 里配置："
+                       "EMAIL_USER + EMAIL_PASS（推荐），或 WECOM_WEBHOOK / BARK_KEY / "
+                       "WXPUSHER_TOKEN+WXPUSHER_UID / PUSHPLUS_TOKEN")
     try:
         if ch == "wecom":
             return _push_wecom(cred, title, html, plain)
@@ -470,10 +502,11 @@ def main():
     if not pick_channel()[0]:
         log("未配置任何推送通道")
         print("\n未配置推送通道。任选其一配置即可：\n"
-              "  WECOM_WEBHOOK    企业微信群机器人（免费无限、无需实名）\n"
-              "  BARK_KEY         iPhone 推送（免费、无需实名）\n"
+              "  EMAIL_USER + EMAIL_PASS   邮件（推荐，免费、无需实名）\n"
+              "  WECOM_WEBHOOK             企业微信群机器人（免费无限、无需实名）\n"
+              "  BARK_KEY                  iPhone 推送（免费、无需实名）\n"
               "  WXPUSHER_TOKEN + WXPUSHER_UID   微信公众号推送（免费）\n"
-              "  PUSHPLUS_TOKEN   注意：未实名账号额度为 0，发不出消息\n")
+              "  PUSHPLUS_TOKEN            注意：未实名账号额度为 0，发不出消息\n")
         sys.exit(2)
     log("使用推送通道: %s" % pick_channel()[0])
 
@@ -559,19 +592,27 @@ def main():
 
     if not news:
         log("本次检查无新增定增相关公告")
-        # 可选心跳：每天推一条"我还在跑"，让你确认系统没死。设 DAILY_HEARTBEAT=1 开启
-        if os.environ.get("DAILY_HEARTBEAT", "").strip() == "1":
+        # 心跳：默认开启（配 DAILY_HEARTBEAT=0 关闭）。每天一封「监控正常」，
+        # 让你能确认任务真的在跑 —— 不然 GitHub Action 全绿你也并不知道有没有执行
+        if (os.environ.get("DAILY_HEARTBEAT", "").strip() or "1") != "0":
             today = datetime.now().strftime("%Y-%m-%d")
             if state.get("last_heartbeat") != today:
                 now = datetime.now().strftime("%Y-%m-%d %H:%M")
-                ok, info = send("【%s】监控正常" % STOCK_NAME,
-                                '<div style="padding:16px;font-family:-apple-system,sans-serif;">'
-                                '<p>监控正常运行，本次检查无新增定增公告。</p>'
-                                '<p style="color:#8a8f99;">检查时间：%s</p></div>' % now,
-                                "监控正常运行，本次检查无新增定增公告。\n检查时间：%s" % now)
-                log("心跳推送: %s | 成功=%s" % (info, ok))
+                latest = max((x["date"] for x in items if x.get("date")), default="-")
+                detail = ("已扫描 %d 条公告（近 %d 天），命中关键词 %d 条，均为历史已推送内容。"
+                          % (len(items), LOOKBACK_DAYS, len(hits)))
+                ok, info = send(
+                    "【%s】监控正常 · %s" % (STOCK_NAME, today),
+                    '<div style="padding:18px;font-family:-apple-system,sans-serif;">'
+                    '<h3 style="margin:0 0 10px 0;">监控正常运行</h3>'
+                    '<p>本次检查无新增定增相关公告。</p>'
+                    '<p style="color:#8a8f99;font-size:13px;">'
+                    '检查时间：%s<br>%s<br>库内最新公告日期：%s</p></div>' % (now, detail, latest),
+                    "监控正常运行，本次检查无新增定增公告。\n检查时间：%s\n%s\n库内最新公告日期：%s"
+                    % (now, detail, latest))
+                log("心跳发送: %s | 成功=%s" % (info, ok))
                 if not ok:
-                    print("心跳推送失败：%s" % info)
+                    print("心跳发送失败：%s" % info)
                     sys.exit(1)
                 state["last_heartbeat"] = today
         save_state(state)

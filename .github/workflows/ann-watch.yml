@@ -27,19 +27,22 @@ jobs:
 
       - name: 运行监控脚本
         env:
-          # 邮件通道（推荐：配合 QQ 邮箱「微信提醒」，新邮件会在微信弹通知）
+          # 邮件通道（默认）。凭据全部走 Secrets，加密存储、日志打码，不落任何文件
           EMAIL_HOST: ${{ secrets.EMAIL_HOST }}
           EMAIL_PORT: ${{ secrets.EMAIL_PORT }}
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
-          # 其他通道，填哪个用哪个
+          # DAILY_HEARTBEAT 留空即为 1（每天一封「监控正常」）。不想收就设成 0
+          DAILY_HEARTBEAT: ${{ secrets.DAILY_HEARTBEAT }}
+          # 想强制指定通道时填（email / wecom / bark / wxpusher / pushplus），留空则自动探测
+          PUSH_CHANNEL: ${{ secrets.PUSH_CHANNEL }}
+          # 备用通道，一般不用管
           WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
           BARK_KEY: ${{ secrets.BARK_KEY }}
           WXPUSHER_TOKEN: ${{ secrets.WXPUSHER_TOKEN }}
           WXPUSHER_UID: ${{ secrets.WXPUSHER_UID }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
-          DAILY_HEARTBEAT: ${{ secrets.DAILY_HEARTBEAT }}
         run: python3 watch.py
 
       - name: 回写已推送记录
@@ -55,7 +58,11 @@ jobs:
             git push
           fi
 
-      - name: 抓取失败时提醒
+      - name: 失败时把日志打出来
         if: failure()
         run: |
-          echo "::warning::本次监控执行失败，请到 Actions 页面查看日志"
+          echo "::error::监控脚本执行失败。GitHub 也会给你发一封失败告警邮件。常见原因：EMAIL_PASS 填了登录密码而非授权码 / EMAIL_PORT 与 EMAIL_HOST 不匹配（465=SSL，587=STARTTLS）"
+          if [ -f watch.log ]; then
+            echo "----- watch.log 最后 40 行（邮箱地址已脱敏）-----"
+            tail -40 watch.log
+          fi
