@@ -1,0 +1,49 @@
+name: 京能电力定增公告监控
+
+# 纯云端执行：不依赖你的电脑是否开机
+on:
+  schedule:
+    # UTC 时间。刻意避开整点（GitHub 高峰期会延迟）：
+    #   UTC 01:07 -> 北京时间 09:07（覆盖盘前披露）
+    #   UTC 13:07 -> 北京时间 21:07（覆盖盘后披露高峰）
+    - cron: '7 1,13 * * *'
+  # 允许在 GitHub 网页上手动点一下立即运行（调试用）
+  workflow_dispatch:
+
+# 防止上一次没跑完又起一个，避免 state.json 写冲突
+concurrency:
+  group: ann-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # 需要把 state.json 写回仓库
+
+    steps:
+      - name: 检出仓库（含已推送记录 state.json）
+        uses: actions/checkout@v4
+
+      - name: 运行监控脚本
+        env:
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+        run: python3 watch.py
+
+      - name: 回写已推送记录
+        run: |
+          git config user.name "ann-watch-bot"
+          git config user.email "ann-watch-bot@users.noreply.github.com"
+          git add state.json
+          if git diff --staged --quiet; then
+            echo "状态无变化，跳过提交"
+          else
+            git commit -m "chore: 更新已推送公告记录"
+            git pull --rebase origin "${{ github.ref_name }}"
+            git push
+          fi
+
+      - name: 抓取失败时提醒
+        if: failure()
+        run: |
+          echo "::warning::本次监控执行失败，请到 Actions 页面查看日志"

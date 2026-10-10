@@ -1,0 +1,435 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+京能电力 (600578.SH) 定向融资 / 定增 公告监控 -> PushPlus 微信推送
+
+用法:
+    python3 watch.py            正常检查，有新公告就推送
+    python3 watch.py --init     首次运行：只记录当前公告基线，不推送
+    python3 watch.py --test     发一条测试消息到微信，验证 token 是否配置正确
+    python3 watch.py --dry      只在终端打印将要推送的内容，不实际推送、不写状态
+    python3 watch.py --all      忽略关键词过滤，检查全部公告
+
+仅依赖 Python 标准库，无需 pip 安装任何包。
+"""
+
+import json
+import os
+import re
+import ssl
+import sys
+import time
+import urllib.parse
+import urllib.request
+from datetime import datetime
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+STATE_PATH = os.path.join(BASE_DIR, "state.json")
+LOG_PATH = os.path.join(BASE_DIR, "watch.log")
+
+STOCK_CODE = "600578"
+STOCK_NAME = "京能电力"
+CNINFO_ORGID = "gssh0600578"      # 巨潮资讯网机构代码
+LOOKBACK_DAYS = 30                # 每次检查回看的天数
+FETCH_PAGES = 2                   # 每个数据源抓取页数
+
+UA = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+}
+
+# ---------------------------------------------------------------------------
+# 关键词：命中任一即推送。想加减范围，直接改这个列表即可。
+# ---------------------------------------------------------------------------
+KEYWORDS = [
+    # 发行本体
+    "向特定对象发行", "向特定对象发行股票", "定向增发", "定增", "非公开发行",
+    "发行A股", "发行股票", "发行股份", "证券发行", "发行注册",
+    # 审核 / 注册流程
+    "审核问询", "问询函", "审核中心", "上市委", "审核通过", "审核结果",
+    "同意注册", "注册批复", "予以注册", "注册生效", "批文",
+    # 方案文件
+    "预案", "论证分析", "可行性分析", "募集说明书", "发行方案",
+    "摊薄即期回报", "填补措施", "前次募集资金",
+    # 审议程序（只盯"临时"股东会——年度股东会是例行事项，已排除）
+    "临时股东会", "临时股东大会", "董事会决议", "监事会决议",
+    # 发行实施
+    "附条件生效", "股份认购", "认购协议", "资产购买协议",
+    "发行结果", "发行情况报告书", "发行价格", "发行对象", "认购邀请书",
+    "验资", "募集资金", "募集资金到位", "新增股份", "股份变动", "上市公告书",
+    # 配套
+    "关联交易暨", "豁免要约", "权益变动",
+]
+
+# 噪音排除：命中这些词说明跟定增无关，直接丢弃
+EXCLUDE = [
+    # 与定增无关的日常事项，命中即丢弃
+    "委托贷款", "日常关联交易", "担保额度", "风险评估报告",
+    "发电量完成情况", "业绩说明会", "投资者关系活动记录",
+    "利润分配预案", "权益分派", "分红", "股东回报规划",
+    "年度股东会", "年度股东大会", "年度报告", "季度报告", "半年度报告",
+    "独立董事辞职", "独立董事津贴", "独立董事述职", "独立董事候选人",
+    "会计师事务所", "审计机构", "续聘", "薪酬", "考核", "责任书",
+]
+
+# ---------------------------------------------------------------------------
+# 里程碑识别：把公告归类到定增流程的具体阶段，推送时一眼看懂进度
+# ---------------------------------------------------------------------------
+STAGES = [
+    ("⑦ 新增股份上市", ["上市公告书", "新增股份", "股份变动", "上市流通"]),
+    ("⑥ 发行实施", ["发行结果", "发行情况报告书", "认购邀请书", "缴款", "验资",
+                    "募集资金到位", "发行价格"]),
+    ("⑤ 证监会同意注册", ["同意注册", "注册批复", "予以注册", "注册生效", "批文"]),
+    ("④ 上交所审核通过", ["上市委", "审核通过", "审核结果", "审核中心意见"]),
+    ("③ 上交所审核中", ["审核问询", "问询函", "问询回复", "审核问询回复", "回复"]),
+    ("② 股东会审议", ["股东大会", "股东会", "临时股东会"]),
+    ("① 董事会/预案", ["预案", "董事会决议", "论证分析", "可行性", "附条件生效",
+                      "摊薄即期回报", "前次募集资金", "书面审核意见", "监事会决议"]),
+]
+
+
+def log(msg):
+    line = "[%s] %s" % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), msg)
+    print(line)
+    try:
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
+
+def http(url, data=None, headers=None, timeout=20):
+    """统一的 HTTP 请求，返回文本。"""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    h = dict(UA)
+    if headers:
+        h.update(headers)
+    body = urllib.parse.urlencode(data).encode("utf-8") if data else None
+    req = urllib.request.Request(url, data=body, headers=h)
+    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+        return resp.read().decode("utf-8", "ignore")
+
+
+# ---------------------------------------------------------------------------
+# 数据源 1：东方财富公告
+# ---------------------------------------------------------------------------
+def fetch_eastmoney():
+    out = []
+    for page in range(1, FETCH_PAGES + 1):
+        url = ("https://np-anotice-stock.eastmoney.com/api/security/ann"
+               "?sr=-1&page_size=50&page_index=%d&ann_type=A"
+               "&client_source=web&stock_list=%s" % (page, STOCK_CODE))
+        try:
+            raw = json.loads(http(url))
+        except Exception as e:
+            log("东方财富抓取失败(page=%d): %s" % (page, e))
+            break
+        lst = (raw.get("data") or {}).get("list") or []
+        if not lst:
+            break
+        for it in lst:
+            code = it.get("art_code") or ""
+            out.append({
+                "title": (it.get("title") or "").strip(),
+                "date": (it.get("notice_date") or "")[:10],
+                "url": "https://pdf.dfcfw.com/pdf/H2_%s_1.pdf" % code if code else "",
+                "src": "东方财富",
+            })
+        time.sleep(0.3)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 数据源 2：巨潮资讯网（法定披露网站，作为备份源）
+# ---------------------------------------------------------------------------
+def fetch_cninfo():
+    out = []
+    url = "http://www.cninfo.com.cn/new/hisAnnouncement/query"
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "Referer": "http://www.cninfo.com.cn/new/commonUrl?url=disclosure/list/notice",
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    for page in range(1, FETCH_PAGES + 1):
+        data = {
+            "pageNum": page, "pageSize": 30, "column": "sse", "tabName": "fulltext",
+            "plate": "", "stock": "%s,%s" % (STOCK_CODE, CNINFO_ORGID),
+            "searchkey": "", "secid": "", "category": "", "trade": "",
+            "seDate": "", "sortName": "", "sortType": "", "isHLtitle": "true",
+        }
+        try:
+            raw = json.loads(http(url, data=data, headers=headers))
+        except Exception as e:
+            log("巨潮抓取失败(page=%d): %s" % (page, e))
+            break
+        anns = raw.get("announcements") or []
+        if not anns:
+            break
+        for a in anns:
+            ts = a.get("announcementTime")
+            date = datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d") if ts else ""
+            adj = a.get("adjunctUrl") or ""
+            out.append({
+                "title": re.sub(r"</?em>", "", a.get("announcementTitle") or "").strip(),
+                "date": date,
+                "url": "http://static.cninfo.com.cn/" + adj if adj else "",
+                "src": "巨潮资讯",
+            })
+        time.sleep(0.3)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 过滤与归类
+# ---------------------------------------------------------------------------
+def norm(t):
+    return re.sub(r"[\s:：·（）()【】\[\]“”\"'‘’]+", "", t)
+
+
+def clean_title(t):
+    """去掉东方财富/巨潮加的股票名前缀，让推送标题更干净。"""
+    return re.sub(r"^%s\s*[:：]\s*" % STOCK_NAME, "", t.strip())
+
+
+def dedupe(items):
+    seen, out = set(), []
+    for it in sorted(items, key=lambda x: x["date"], reverse=True):
+        k = norm(it["title"])
+        if not k or k in seen:
+            continue
+        seen.add(k)
+        out.append(it)
+    return out
+
+
+def within_lookback(date_str):
+    if not date_str or len(date_str) < 10:
+        return False
+    try:
+        d = datetime.strptime(date_str[:10], "%Y-%m-%d")
+    except Exception:
+        return False
+    return (datetime.now() - d).days <= LOOKBACK_DAYS
+
+
+def matched(title):
+    t = norm(title)
+    if any(norm(x) in t for x in EXCLUDE):
+        return False
+    return [k for k in KEYWORDS if norm(k) in t]
+
+
+def stage_of(title):
+    t = norm(title)
+    for stage, kws in STAGES:
+        if any(norm(k) in t for k in kws):
+            return stage
+    return "· 定增相关"
+
+
+# ---------------------------------------------------------------------------
+# PushPlus 推送
+# ---------------------------------------------------------------------------
+def pushplus(token, title, content):
+    url = "https://www.pushplus.plus/send"
+    payload = json.dumps({
+        "token": token, "title": title, "content": content,
+        "template": "html", "channel": "wechat",
+    }).encode("utf-8")
+    req = urllib.request.Request(url, data=payload, headers={
+        "Content-Type": "application/json", "User-Agent": UA["User-Agent"],
+    })
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    with urllib.request.urlopen(req, timeout=20, context=ctx) as resp:
+        return json.loads(resp.read().decode("utf-8", "ignore"))
+
+
+def build_content(news):
+    rows = []
+    for n in news:
+        link = ('<a href="%s">查看 PDF 原文</a>' % n["url"]) if n["url"] else "（无原文链接）"
+        rows.append(
+            '<div style="margin:0 0 18px 0;padding:12px 14px;background:#f7f8fa;'
+            'border-left:4px solid #c0392b;border-radius:6px;">'
+            '<div style="font-size:12px;color:#8a8f99;margin-bottom:6px;">'
+            '%s · %s · %s</div>'
+            '<div style="font-size:16px;font-weight:600;color:#1f2329;'
+            'line-height:1.5;margin-bottom:4px;">%s</div>'
+            '<div style="font-size:14px;color:#c0392b;font-weight:600;'
+            'margin-bottom:8px;">%s</div>'
+            '<div style="font-size:13px;">%s</div>'
+            '</div>' % (n["date"], STOCK_NAME, n["src"], n["title"], n["stage"], link)
+        )
+    return "".join(rows)
+
+
+# ---------------------------------------------------------------------------
+# 状态读写
+# ---------------------------------------------------------------------------
+def load_state():
+    if not os.path.exists(STATE_PATH):
+        return {"seen": [], "last_check": None}
+    try:
+        with open(STATE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"seen": [], "last_check": None}
+
+
+def save_state(state):
+    state["last_check"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    state["seen"] = state["seen"][-500:]
+    with open(STATE_PATH, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+
+def get_token():
+    tok = os.environ.get("PUSHPLUS_TOKEN", "").strip()
+    if tok:
+        return tok
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                return (json.load(f).get("pushplus_token") or "").strip()
+        except Exception:
+            pass
+    return ""
+
+
+# ---------------------------------------------------------------------------
+def main():
+    args = sys.argv[1:]
+    do_init = "--init" in args
+    do_test = "--test" in args
+    do_dry = "--dry" in args
+    do_all = "--all" in args
+
+    log("=" * 60)
+    log("开始检查 %s(%s) 公告" % (STOCK_NAME, STOCK_CODE))
+
+    token = get_token()
+    if not token:
+        log("未配置 PushPlus token，请把 config.example.json 复制为 config.json 并填入 token")
+        print("\n未配置 PushPlus token。")
+        print("1) 打开 https://www.pushplus.plus/ 微信扫码登录")
+        print("2) 首页复制你的 token（32位字符串）")
+        print("3) 编辑 %s 填入 token" % CONFIG_PATH)
+        sys.exit(2)
+
+    if do_test:
+        r = pushplus(token, "【测试】京能电力公告监控已就绪",
+                     '<div style="padding:20px;font-family:-apple-system,sans-serif;">'
+                     '<h3>✅ 配置成功</h3>'
+                     '<p>京能电力（600578.SH）定增/定向融资公告将推送到这个微信。</p>'
+                     '<p style="color:#8a8f99;">测试时间：%s</p></div>'
+                     % datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        log("测试推送返回: %s" % r)
+        print("推送结果:", json.dumps(r, ensure_ascii=False))
+        sys.exit(0 if r.get("code") == 200 else 1)
+
+    # 抓取 -> 统一标题 -> 去重（两源标题前缀不同，必须先清洗再去重）
+    raw_items = fetch_eastmoney() + fetch_cninfo()
+    for x in raw_items:
+        x["title"] = clean_title(x["title"])
+    items = dedupe(raw_items)
+    if not items:
+        log("两个数据源都没抓到公告，本次跳过（避免误报）")
+        sys.exit(1)
+    log("共抓取到 %d 条不重复公告" % len(items))
+
+    # 首次运行自动建立基线，避免一次性刷屏历史公告
+    first_run = not os.path.exists(STATE_PATH)
+    if first_run:
+        do_init = True
+        log("首次运行：自动建立基线，不推送历史公告")
+
+    recent = [x for x in items if within_lookback(x["date"])]
+    if do_all:
+        hits = recent
+        for h in hits:
+            h["stage"] = stage_of(h["title"])
+    else:
+        hits = []
+        for x in recent:
+            ks = matched(x["title"])
+            if ks:
+                x["stage"] = stage_of(x["title"])
+                hits.append(x)
+
+    state = load_state()
+    seen = set(state.get("seen", []))
+    news = [x for x in hits if norm(x["title"]) not in seen]
+    news.sort(key=lambda x: x["date"], reverse=True)
+
+    if do_init:
+        for x in items:
+            seen.add(norm(x["title"]))
+        state["seen"] = sorted(seen)
+        save_state(state)
+        log("已建立基线：记录 %d 条历史公告，后续仅推送新增" % len(seen))
+        print("\n基线建立完成，记录了 %d 条历史公告。" % len(seen))
+        print("下次运行时起，只推送新增的定增相关公告。")
+        if first_run and not do_dry:
+            latest = [x for x in items if matched(x["title"])]
+            latest.sort(key=lambda x: x["date"], reverse=True)
+            tail = ""
+            if latest:
+                tail = ("<p style='font-size:14px;'>当前最新一条定增公告："
+                        "<b>%s</b>（%s）</p>" % (latest[0]["title"], latest[0]["date"]))
+            try:
+                r = pushplus(token, "【%s】公告监控已启动" % STOCK_NAME,
+                             '<div style="padding:20px;font-family:-apple-system,sans-serif;">'
+                             '<h3>✅ 监控已启动</h3>'
+                             '<p>京能电力（600578.SH）定增/定向融资公告将自动推送到本微信。</p>'
+                             '<p style="color:#8a8f99;">已记录 %d 条历史公告作为基线，'
+                             '此后仅推送新增公告。</p>%s</div>' % (len(seen), tail))
+                log("启动通知推送结果: %s" % r)
+            except Exception as e:
+                log("启动通知推送失败: %s" % e)
+        sys.exit(0)
+
+    if not news:
+        log("本次检查无新增定增相关公告")
+        save_state(state)
+        sys.exit(0)
+
+    log("发现 %d 条新公告，准备推送" % len(news))
+    content = build_content(news)
+    title = "【%s】定增新公告 %d 条 · %s" % (STOCK_NAME, len(news), news[0]["stage"].strip("①②③④⑤⑥⑦ "))
+
+    if do_dry:
+        print("\n--- 将要推送 ---\n标题:", title)
+        for n in news:
+            print("  [%s] %s | %s | %s" % (n["date"], n["stage"], n["title"], n["url"]))
+        sys.exit(0)
+
+    for attempt in range(3):
+        try:
+            r = pushplus(token, title, content)
+            log("推送返回: %s" % r)
+            if r.get("code") == 200:
+                for x in news:
+                    seen.add(norm(x["title"]))
+                state["seen"] = sorted(seen)
+                save_state(state)
+                log("推送成功，状态已更新")
+                print("推送成功：%d 条公告已发到微信" % len(news))
+                sys.exit(0)
+            log("推送失败(code=%s): %s" % (r.get("code"), r.get("msg")))
+        except Exception as e:
+            log("推送异常(第%d次): %s" % (attempt + 1, e))
+        time.sleep(3)
+
+    log("三次推送均失败，状态未更新，下次会重试")
+    sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
